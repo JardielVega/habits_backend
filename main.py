@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+from typing import Optional
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -24,8 +26,21 @@ app.add_middleware(
 )
 
 # 2. Conectar los clientes de Supabase y Groq (IA) usando tus llaves
-supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+groq_api_key = os.getenv("GROQ_API_KEY")
+
+supabase: Optional[Client] = None
+groq_client = None
+
+if supabase_url and supabase_key:
+    supabase = create_client(supabase_url, supabase_key)
+
+if groq_api_key:
+    groq_client = Groq(api_key=groq_api_key)
+
+BASE_DIR = Path(__file__).resolve().parent
+CONOCIMIENTO_PATH = BASE_DIR / "conocimiento.txt"
 
 
 # 3. MOLDES DE DATOS (Pydantic): Definen qué estructura de datos nos enviará tu JavaScript
@@ -142,17 +157,20 @@ def obtener_consejo_ia(habito_id: int, nombre_habito: str, pregunta: str):
     """Lee tus apuntes locales, mira el historial del usuario y consulta a Groq"""
     try:
         # A. Leer tu archivo de apuntes especializado
-        with open("conocimiento.txt", "r", encoding="utf-8") as f:
-            teoria_experta = f.read()
+        try:
+            teoria_experta = CONOCIMIENTO_PATH.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            teoria_experta = "No se encontró conocimiento local adicional."
 
         # B. Buscar en Supabase qué ha hecho el usuario con este hábito en los últimos 7 días
-        historial_bd = supabase.table("registro_habitos")\
-            .select("fecha, completado, nota_emocional")\
-            .eq("habito_id", habito_id)\
-            .order("fecha", desc=True)\
-            .limit(7).execute()
-        
-        historial_texto = str(historial_bd.data)
+        historial_texto = "[]"
+        if supabase is not None:
+            historial_bd = supabase.table("registro_habitos")\
+                .select("fecha, completado, nota_emocional")\
+                .eq("habito_id", habito_id)\
+                .order("fecha", desc=True)\
+                .limit(7).execute()
+            historial_texto = str(historial_bd.data)
 
         # C. Construir las instrucciones secretas para el modelo Llama 3
         prompt_sistema = f"""
@@ -169,16 +187,28 @@ def obtener_consejo_ia(habito_id: int, nombre_habito: str, pregunta: str):
         """
 
         # D. Hacer la consulta gratuita a Groq (Llama 3)
-        conversion = groq_client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": pregunta}
-            ],
-            temperature=0.7
-        )
+        if groq_client is not None:
+            conversion = groq_client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[
+                    {"role": "system", "content": prompt_sistema},
+                    {"role": "user", "content": pregunta}
+                ],
+                temperature=0.7
+            )
 
-        return {"consejo": conversion.choices[0].message.content}
+            return {"consejo": conversion.choices[0].message.content}
+
+        consejo_respaldo = (
+            f"Sobre '{nombre_habito}', empieza con una versión más pequeña de lo que intentas hacer. "
+            f"Si hoy te cuesta, reduce la fricción: prepara el entorno, fija una hora concreta y haz solo el primer paso. "
+            f"Tu pregunta fue: {pregunta}."
+        )
+        return {"consejo": consejo_respaldo}
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        consejo_respaldo = (
+            f"No pude consultar la IA ahora mismo. Para '{nombre_habito}', prioriza una acción mínima hoy, "
+            f"repite a la misma hora mañana y evita intentar hacerlo perfecto desde el inicio."
+        )
+        return {"consejo": consejo_respaldo, "detail": str(e)}

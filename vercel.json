@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/main.py"
+    }
+  ]
+<<<<<<< HEAD
+}
+=======
+}
+>>>>>>> 10a55e40dcc87fc373e37a306e958bc1908d42e2
