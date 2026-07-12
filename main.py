@@ -29,6 +29,7 @@ app.add_middleware(
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
 groq_api_key = os.getenv("GROQ_API_KEY")
+groq_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 supabase: Optional[Client] = None
 groq_client = None
@@ -139,12 +140,54 @@ def eliminar_habito(habito_id: int):
 def cumplir_habito(datos: CheckHabitoData):
     """Registra en la base de datos cuándo se marca un hábito como hecho"""
     try:
+        fecha_actual = datetime.utcnow()
+        fecha_actual_iso = fecha_actual.isoformat()
+        fecha_actual_dia = fecha_actual.date()
+
         data = supabase.table("registro_habitos").insert({
             "habito_id": datos.habito_id,
-            "fecha": datetime.utcnow().isoformat(),
+            "fecha": fecha_actual_iso,
             "completado": datos.completado,
             "nota_emocional": datos.nota_emocional
         }).execute()
+
+        if supabase is not None:
+            habito_actual = supabase.table("habitos")\
+                .select("id, racha, ultimo_completado, completado_hoy")\
+                .eq("id", datos.habito_id)\
+                .limit(1).execute()
+
+            if habito_actual.data:
+                registro = habito_actual.data[0]
+                ultimo_completado = registro.get("ultimo_completado")
+                racha_actual = registro.get("racha") or 0
+                ultimo_dia = None
+
+                if ultimo_completado:
+                    try:
+                        ultimo_dia = datetime.fromisoformat(str(ultimo_completado).replace("Z", "+00:00")).date()
+                    except ValueError:
+                        ultimo_dia = None
+
+                if datos.completado:
+                    if ultimo_dia == fecha_actual_dia:
+                        nueva_racha = racha_actual
+                    else:
+                        nueva_racha = racha_actual + 1
+
+                    supabase.table("habitos").update({
+                        "completado_hoy": True,
+                        "ultimo_completado": fecha_actual_iso,
+                        "racha": nueva_racha,
+                    }).eq("id", datos.habito_id).execute()
+                else:
+                    nueva_racha = racha_actual - 1 if ultimo_dia == fecha_actual_dia and racha_actual > 0 else racha_actual
+
+                    supabase.table("habitos").update({
+                        "completado_hoy": False,
+                        "racha": nueva_racha,
+                    }).eq("id", datos.habito_id).execute()
+
         return data.data
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -186,10 +229,10 @@ def obtener_consejo_ia(habito_id: int, nombre_habito: str, pregunta: str):
         Responde de forma clara, motivadora y en español. Evita respuestas excesivamente largas.
         """
 
-        # D. Hacer la consulta gratuita a Groq (Llama 3)
+        # D. Hacer la consulta gratuita a Groq con un modelo vigente
         if groq_client is not None:
             conversion = groq_client.chat.completions.create(
-                model="llama3-8b-8192",
+                model=groq_model,
                 messages=[
                     {"role": "system", "content": prompt_sistema},
                     {"role": "user", "content": pregunta}
